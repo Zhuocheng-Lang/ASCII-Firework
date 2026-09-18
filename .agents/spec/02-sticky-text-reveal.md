@@ -62,6 +62,10 @@
 
 ## 3. 数据契约
 
+> **spec 03 §2 扩展**：`Target` 增可选 `glyph`；采样输出为 `GlyphTarget extends Point`；
+> `world.textFontSize` + `world.textLines` 由 `world.textLayout: TextLayout | null` 取代。
+> 本节其余不变量（唯一占据、`order` 身份、阶段）继续有效。
+
 ### 3.1 类型（`src/fireworks.ts`）
 
 ```ts
@@ -134,7 +138,7 @@ export interface Batch {
 | 常量 | 取值 | 来源 | 语义与不可破坏性 |
 | --- | --- | --- | --- |
 | `PLAYER_BLASTS_TO_FINALE` | `10` | 产品决策 | 轮数阈值；**不得**按点击或总爆炸计数 |
-| `TEXT_SHARE` | `0.55` | 本文工程取值 | 目标点上限 = `floor(cap * TEXT_SHARE)`；必须在 1200/420 两档都为升空、装饰、在途留出空间 |
+| `TEXT_SHARE` | `0.55` | 本文工程取值 | 目标点上限 = `floor(cap * TEXT_SHARE)`；必须在 1800/640 两档都为升空、装饰、在途留出空间（回写 2026-09 rev2：1200/420 → 1800/640，比例不变） |
 | `GLUE_SHARE` | `0.45` | 本文，待视觉验证 | 每次爆炸中带粘附资格的火花比例；保证"整朵不会全冻在文字上" |
 | `CAPTURE_STEP_MUL` | `1.2` | 设计"约一个采样间距" | 接触半径 = `clamp(step * 1.2, CAPTURE_MIN, CAPTURE_MAX)` |
 | `CAPTURE_MIN` / `CAPTURE_MAX` | `8` / `24` px | 本文，待视觉验证 | 接触半径上下限；上限即"不允许远距离磁吸"的硬边界 |
@@ -174,12 +178,16 @@ export interface Batch {
 
 ### 4.1 目标采样与身份（`sampleTargets` + `applyTargets`）
 
+> **已被 spec 03 §4 取代**：采样改为「Unicode 分段 → 断行拟合 → 高分辨率遮罩 → 单元特征 →
+> 方向字形 → 预算自适应」；`step` 改存 `cellH`，超限的 **stride 抽稀被禁止**（改为放大单元完整重生成）。
+> `applyTargets` 的槽位初始化 / 迁移 / 桶重建 / 阶段补点契约不变，仅新增 `glyph` 透传。以下为历史文本。
+
 `sampleTargets(world, message): { x, y }[]`（**唯一的 DOM 入口**）
 
 - 复用现有排版数学：测量最宽行 → `size = clamp(min(sizeByWidth, sizeByHeight), 16, 140)` → `step = round(clamp(size / 8, 5, 16))` → `world.textSize = step * 1.05`。
 - 离屏画布改为**模块级复用**（尺寸变化时才重设），消除 spec 01/评审 §3.7 的每次 resize 重新分配（MAY）。
 - 扫描顺序：`y` 外层、`x` 内层，逐点判断 alpha > 128。**删除洗牌**——扫描序即目标身份顺序 `order`。
-- `limit = floor(world.cap * TEXT_SHARE)`（1200 → 660；420 → 231）。超限用现有 **stride 抽稀**：它沿扫描序均匀丢弃，保证每一行、每个字的主要笔画都留下至少一个采样点（不得随机抽稀）。
+- `limit = floor(world.cap * TEXT_SHARE)`（1800 → 990；640 → 352；回写 2026-09 rev2：原 1200 → 660、420 → 231）。超限用现有 **stride 抽稀**：它沿扫描序均匀丢弃，保证每一行、每个字的主要笔画都留下至少一个采样点（不得随机抽稀）。
 - 空格、空行、`message === ""` 不产生目标。空祝福返回 `[]`。
 
 `applyTargets(world, points, step)`（**纯函数**，Node 可直接调用）
@@ -352,7 +360,7 @@ u >= 1 → 同 §4.3 的落定收尾（slot → stuck）
 
 ### 4.8 预算保护
 
-- 目标上限 `floor(cap * TEXT_SHARE)`（正常 660、低动态 231）；**先保证每个字都有采样**，再抽稀密度。
+- 目标上限 `floor(cap * TEXT_SHARE)`（正常 990、低动态 352）；**先保证每个字都有采样**，再抽稀密度。
 - `compact` / `enforceCap` 规则不变：`kind === "text"` 与 `rocket` 不淘汰；被淘汰的只有 trail/ember/spark，因此"粘点与有效补字粒子不被装饰粒子挤掉"自动成立。
 - 过渡中的粘附粒子与在途补字粒子都是 `kind: "text"`，同样受保护。
 - 装饰降级 SHOULD：`world.particles.length > cap * 0.8` 时跳过尾迹生成（每帧一处判断）；收尾小烟花装饰量低于玩家爆炸（§4.5）。
@@ -512,7 +520,7 @@ function commitScene(next: SceneConfig): void {
 | 16 | 完成态重排仍完整 | `settled` 后 `applyTargets` 到更密的点集：模拟一帧后 `stuck === targets.length`、`phase === "settled"` |
 | 17 | 空祝福不越界 | `targets` 为空时 `startFinale` no-op；10 次爆炸后 `phase` 仍 `playing` |
 | 18 | 颜色统一与呼吸 | `mixHex('#ffffff', '#000000', 0.5)` 落在中间值；`settleT = 0` 时文字解析色 = 来源色，`settleT >= COLOR_FADE` 时 = `palette.glow`；呼吸只改 alpha（同 `clock` 下两次渲染的 `x/y` 相同） |
-| 19 | 保留既有契约 | `createRng` 可复现、默认上限 1200/420、resetScene 归零、七发火箭全部爆炸等旧用例继续通过（用例名与断言保持，除非被本文取代） |
+| 19 | 保留既有契约 | `createRng` 可复现、默认上限 1800/640、resetScene 归零、七发火箭全部爆炸等旧用例继续通过（用例名与断言保持，除非被本文取代） |
 
 ### 8.2 自动化完成契约 vs 人工视觉
 
@@ -575,11 +583,11 @@ M7–M9 内不得顺手调 §3.2 的数值（除明确标注"待视觉验证"的
 | 风险 | 处理 |
 | --- | --- |
 | 参数（接触半径、粘附比例、收尾节奏、统一色时长）只有设计区间，没有实测 | 集中在 §3.2 标注；M10 用录屏/真机观察逐项调，改动写进提交描述 |
-| 3 行 × 60 字在 660/231 点上限下的可读性 | 采样必须保证"每字有笔画点"；M10 人工判定；不足时先提 `TEXT_SHARE`，再降采样步长上限，不牺牲完整补齐 |
+| 3 行 × 60 字在 990/352 点上限下的可读性 | 采样必须保证"每字有笔画点"；M10 人工判定；不足时先提 `TEXT_SHARE`，再降采样步长上限，不牺牲完整补齐 |
 | 收尾节奏的观感：活动时长已按构造 ≤ `FINALE_ACTIVITY`，但"一波同时绽放多朵小烟花"在缺口零碎时是否显得杂乱 | 属待视觉验证；M10 用 `FINALE_WAVE_MAX` / `FINALE_ACTIVITY` / `BATCH_CELL` 三个旋钮调，任何情况下都不引入瞬移 |
 | 视口迁移按扫描序比例映射，长宽比剧变时可能释放偏多粘点 | 属设计允许的小幅差异；M10 观察横竖屏切换；必要时收紧 `MIGRATE_TOL` |
 | 每次编辑/旋转都做一次全屏采样（`getImageData`） | 离屏画布模块级复用 + 200ms 防抖；M10 在真机记录一次采样耗时 |
-| 660 个永久文字粒子 + 装饰 + 在途的帧时间 | 文字只在占据时才成为粒子；`enforceCap` 保护 text；M10 记录帧时间，必要时降 `TEXT_SHARE` |
+| 990 个永久文字粒子 + 装饰 + 在途的帧时间 | 文字只在占据时才成为粒子；`enforceCap` 保护 text；M10 记录帧时间，必要时降 `TEXT_SHARE` |
 | 完成态 resize 会即时补齐新目标（可见小幅"跳出"） | 设计只要求"完成态仍完整"；若视觉不可接受，需向用户确认取舍（见 §12） |
 
 ## 12. 与设计 02 的差异与最小待确认问题

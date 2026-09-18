@@ -421,9 +421,18 @@ export function activeCount(world: World): number
 
 - 发射点：`x = 指针 x`（键盘发射取 `w/2 + rng()*w*0.16 - w*0.08`），`y = h + 12`。
 - 顶点：`apexY = clamp(指针 y ?? h * 0.35, h * 0.15, h * 0.6)`；初速 `vy0 = -Math.sqrt(2 * G * (h - apexY))`，`vx0 = (rng() - 0.5) * 30`。
-- 顶点判定：`vy >= -8` ⇒ 转为爆炸：生成 `n = 56 + floor(rng() * 34)` 个 spark（`reducedMotion` 时 × 0.4）。
-- 爆炸分布：角度均匀 `2π * i / n` + 抖动 ±8%；速率 `70 + rng() * 160 px/s`；颜色取 `palette.sparks[i % 3]`，8% 概率用 `palette.rocket`；字形随机取 `GLYPHS`。
-- 火箭尾迹：每 20ms 累加器生成 1 个 `kind='trail'` 粒子（**最多 50/s**：每帧最多补 1 个，帧率低时按比例减少；不做 `while` 补齐，卡顿帧后不会集中生成粒子）；字形限 `.` `:` `|`，颜色 `palette.glow`，初速继承火箭的 30%。
+- 顶点判定：`vy >= -8` ⇒ 转为爆炸：生成 `n = 170 + floor(rng() * 90)` 个火花（`reducedMotion` 时 × 0.4）。
+  > 回写（2026-09，产品所有者视觉指示“爆炸粒子更多”）：`56 + rng() * 34` → `110 + rng() * 70`（约 2 倍）。
+  > 回写（2026-09 rev2，“更绚烂：更多粒子／更长尾迹／更大密度／更大范围”）：`110 + rng() * 70` → `170 + rng() * 90`（约 1.5 倍；与 `PARTICLE_CAP` 同比例，见 §7.2-上限）。
+- 爆炸分布：**双壳层**，外层保持单环观感，内核慢速盘填满环心（更大密度）：
+  - 外层：`n - core` 个，角度均匀 `2π * i / n` + 抖动 ±8%，速率 `100 + rng() * 230 px/s`（更大范围：径向峰值 175 → 227px）。
+  - 内核：`core = floor(n * 0.35)` 个，速率 `100 * (0.1 + rng() * 0.8)` px/s（10–90px/s，逐粒子取值），角度同样均匀。
+    > 回写（2026-09 视觉修复「奇怪的圈」，产品所有者截图）：`100 * 0.45 * (0.8 + rng() * 0.4)`
+    > （36–54px/s，整朵同一个值）→ 逐粒子铺满 `[0.1, 0.9] × SPARK_SPEED_MIN`。同速会让全部内核粒子落在
+    > **同一半径**上，画出来是带空洞的细圈（review/04 §4 未观察项，现判定不达标）；速率区间使内核
+    > 成为从中心铺到外层内缘的盘。
+  - 两层共有：颜色取 `palette.sparks[i % 3]`，8% 概率用 `palette.rocket`；字形随机取 `GLYPHS`；共享同一次爆炸的 `n` 预算（内核是**切分**，不额外加量）。
+- 火箭尾迹：每 20ms 累加器生成 1 个 `kind='trail'` 粒子（**最多 50/s**：每帧最多补 1 个，帧率低时按比例减少；不做 `while` 补齐，卡顿帧后不会集中生成粒子）；**寿命 0.7s**（回写 rev2：0.35 → 0.7，更长尾迹：可见尾迹长度 ≈ 火箭速度 × 寿命，约 170 → 340px）；字形限 `.` `:` `|`，颜色 `palette.glow`，初速继承火箭的 30%。
 - 爆炸闪光上限：**MUST NOT** 有整屏叠加式白闪；背景亮化只允许通过 `#aura` 的不透明度变化，揭示期该变化 ≤ 0.12。
 - `world.blasts` 在爆炸生成时 +1（不是发射时）。
 
@@ -432,7 +441,8 @@ export function activeCount(world: World): number
 - 层序（自下而上）：CSS 背景（`#aura`）→ Canvas 清屏后的 trail/spark/ember（背景烟花）→ `kind === 'text'` 粒子 → HTML 控件。稳定后新烟花天然落在文字后方。
 - `render` 只做 `clearRect` + 逐粒子 `fillText`；每帧设置一次 `ctx.font`，`globalAlpha` 与 `fillStyle` 仅在变化时赋值。
 - 字形字体栈：`'"ascii-mono", ui-monospace, monospace'`；`textAlign = 'center'`，`textBaseline = 'middle'`。
-- 字形尺寸：爆炸粒子 `13px`；文字粒子 `= 采样步长 × 1.05`（见 §7.6）。
+- 字形尺寸：爆炸粒子 `13px`；文字粒子 `= 采样步长 × 1.05`（见 §7.6）。> spec 03 §4.5 取代：文字粒子字号 = 单元高 `cellH`（见 `03-directional-ascii-text.md`）。
+> 爆炸粒子字号仍为 13px（本轮未改：更密集的观感来自火花数量与双壳层，而不是放大字形）。
 - 画布：CSS 尺寸跟随视口，像素尺寸 `Math.round(cssW * dpr)`，`dpr = Math.min(devicePixelRatio, 2)`；绘制前 `ctx.setTransform(dpr, 0, 0, dpr, 0, 0)`。DPR **MUST** 封顶 2。
 - 离屏采样画布用 `document.createElement('canvas')`（普通隐藏元素）。**MUST NOT** 使用 `OffscreenCanvas` API（设计与版本基线都排除）。
 
@@ -542,6 +552,9 @@ export function activeCount(world: World): number
 
 ## 10. 字体资产
 
+> **已被 spec 03 §6 修订**：字形清单由 8 个扩为 **9 个**（新增 `-`），命令与体积见 `03-directional-ascii-text.md` §6；
+> 本节其余内容（OFL 许可、`@font-face`、加载门、系统 CJK 字体栈、懒人替代）继续有效。
+
 - `public/fonts/ascii-mono.woff2` 只包含 Canvas 会用到的 8 个字形：`* + . : | / \ @`。子集化命令（开发期一次性执行，产物入库）：
 
 ```bash
@@ -558,7 +571,7 @@ uvx --from fonttools pyftsubset JetBrainsMono-Regular.ttf \
 
 ## 11. 硬约束清单（实现完成后逐条自查）
 
-- [ ] `PARTICLE_CAP = 1200` 单一全局上限；reduced motion 下 420。
+- [ ] `PARTICLE_CAP = 1800` 单一全局上限；reduced motion 下 640（回写 2026-09 rev2：1200/420 → 1800/640，与单朵爆炸火花数 1.5 倍同比例）。
 - [ ] `dpr <= 2`，离屏采样画布同规则。
 - [ ] 隐藏页停 rAF，恢复不产生物理跳跃。
 - [ ] 无 `innerHTML`、无内联 `style` 属性、无 `OffscreenCanvas`、无对象池。
@@ -608,7 +621,7 @@ pnpm build && pnpm exec wrangler dev          # 验证 _headers：curl -sI http:
 | 竖屏/横屏/桌面均可操作 | 三种视口各放 2 次并打开对话框 |
 | DPR 缓冲封顶 2 | 控制台：`document.querySelector('#sky').width === Math.round(innerWidth * Math.min(devicePixelRatio, 2))` |
 | 后台暂停无跳跃 | 切后台 10s 返回，粒子不瞬移 |
-| 1200 粒子可接受帧率 | 第 7 次爆炸后 3s 内用 Performance 面板测均帧时间，目标 ≤ 20ms（记录设备型号） |
+| 1800 粒子可接受帧时间 | 连点至上限后 3s 内用 Performance 面板测均帧时间，目标 ≤ 20ms（记录设备型号）；超限则先回退 `BLAST_SPARKS_BASE`/`PARTICLE_CAP` 到 spec 02 记录的上一档 |
 | 降低动态效果可获知祝福 | DevTools 渲染面板开启 `prefers-reduced-motion`，仍触发成字且无强闪烁 |
 | 打开无声 | 首屏 Network/Media 无音频，`AudioContext` 未创建 |
 | 仅手势后创建音频 | 点击 `#sound` 后才有 `AudioContext`；关闭后无声音 |
