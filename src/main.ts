@@ -1,4 +1,5 @@
 import {
+  MAX_CHARS,
   PALETTES,
   buildShareUrl,
   clampMessage,
@@ -46,7 +47,6 @@ const counter = must<HTMLElement>("#counter");
 const shareUrl = must<HTMLInputElement>("#share-url");
 const ctx = get2d(canvas);
 
-const MAX_CHARS = 60;
 /** 提示驻留（秒）：纯粹是 UI 计时器，与模拟时钟无关。 */
 const HINT_DWELL = 1.6;
 const FINALE_HINT_DWELL = 2.4;

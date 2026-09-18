@@ -1,26 +1,61 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_SCENE } from "./scene.ts";
+import { DEFAULT_SCENE, MAX_LINES } from "./scene.ts";
 import type { SceneConfig } from "./scene.ts";
 import {
+  BACKDROP_ALPHA,
+  BACKDROP_FADE,
+  BLAST_SPARKS_BASE,
+  CELL_MAX,
+  CELL_MIN,
+  CENTROID_CLAMP,
+  COH_MIN,
+  COVER_DENSE,
+  COVER_MIN,
+  DECOR_FLOOR,
+  EDGE_MIN,
+  K_MAX,
+  MAX_ATTEMPTS,
   MAX_FLIGHT,
   PARTICLE_CAP,
+  PER_GLYPH_BUDGET,
+  REDUCED_TEXT_HARD_CAP,
+  SPARK_SPEED_MIN,
   STICK_TIME,
+  TEXT_HARD_CAP,
   applyTargets,
+  cellFeatures,
+  cellMetrics,
   createRng,
   createWorld,
+  cutRanks,
+  directionBin,
+  gridTargets,
+  hasSegmenter,
   launch,
   layoutTextLines,
   mixHex,
+  pickGlyph,
+  planCellScale,
+  refreshTargets,
   render,
   resetScene,
+  segmentText,
   setViewport,
+  splitGraphemes,
   startFinale,
+  textBudget,
   textColor,
   update,
 } from "./fireworks.ts";
-import type { Particle, Point, World } from "./fireworks.ts";
+import type {
+  CellFeatures,
+  Mask,
+  Particle,
+  Point,
+  World,
+} from "./fireworks.ts";
 
 const view = { w: 800, h: 600, dpr: 2 };
 const scene = (patch: Partial<SceneConfig> = {}): SceneConfig => ({
@@ -84,37 +119,386 @@ function spark(patch: Partial<Particle> = {}): Particle {
 const textParticles = (world: World): Particle[] =>
   world.particles.filter((p) => p.kind === "text");
 
-test("spec 03 单行长文案自动换行，短句与显式换行保持原样", () => {
-  const measure = (text: string): number => Array.from(text).length * 50;
+/** 注入度量：按 size 线性缩放的 0.5em/字（与真实 `measureText` 语义一致）。 */
+const halfEm = (text: string, size: number): number =>
+  (Array.from(text).length * 50 * size) / 100;
+/** 注入度量：1em/字（CJK 近似），用于长行与窄屏。 */
+const em = (text: string, size: number): number =>
+  Array.from(text).length * size;
+
+/** 每行在 `SIZE_MIN` 下都进安全区（spec 04 §3.2 / §4.3）。 */
+const fitsAtMin = (lines: string[], safeW: number): boolean =>
+  lines.every((line) => em(line, 16) <= safeW);
+
+test("§10.1-4 单行长文案自动换行，短句与显式换行保持原样", () => {
   assert.deepEqual(
     layoutTextLines(
       "The quick brown fox jumps over the lazy dog.",
       860,
       400,
-      measure,
+      halfEm,
     ),
     ["The quick brown", "fox jumps over", "the lazy dog."],
   );
-  assert.deepEqual(layoutTextLines("短句", 860, 400, measure), ["短句"]);
-  assert.deepEqual(layoutTextLines("第一行\n第二行", 860, 400, measure), [
+  assert.deepEqual(layoutTextLines("短句", 860, 400, halfEm), ["短句"]);
+  assert.deepEqual(layoutTextLines("第一行\n第二行", 860, 400, halfEm), [
     "第一行",
     "第二行",
   ]);
 });
 
-test("低动态完成态先画等大半透明底字，再画放大的 ASCII", () => {
-  const world = createWorld(scene({ message: "祝福" }), view, {
-    reducedMotion: true,
-  });
-  world.phase = "settled";
-  world.textFontSize = 80;
-  world.textLines = ["祝福"];
-  world.textSize = 20;
-  world.particles.push({
-    ...spark({ x: 400, y: 300, glyph: "@", kind: "text" }),
-    settled: true,
-  });
+test("§4.3-2 候选行数上限是 MAX_LINES：窄长视口下 8 行 > 旧上限 3 行", () => {
+  const eight = "祝".repeat(8);
+  // 1em/字、safeW = SIZE_MIN 下 8 字刚好装满 → 行数越多字号越大
+  const lines = layoutTextLines(eight, 128, 4000, em);
+  assert.equal(lines.length, MAX_LINES);
+  assert.equal(lines.join(""), eight);
+  assert.ok(fitsAtMin(lines, 128));
+  // 手机竖屏 20 字：候选放宽到 5 行比旧 3 行字号更大（§4.3-2）
+  const phone = "祝".repeat(20);
+  const five = layoutTextLines(phone, 322, 480, em);
+  assert.equal(five.length, 5);
+  assert.equal(five.join(""), phone);
+  // SIZE_MAX 处行数平局：行数更少的排法胜出（与旧规则一致，不把短句拆成多行）
+  assert.deepEqual(layoutTextLines("祝福", 322, 480, em), ["祝福"]);
+});
 
+test("§4.3-3 长显式行折行：200 字单行在 SIZE_MIN 下不溢出安全区", () => {
+  const long = "字".repeat(200);
+  const lines = layoutTextLines(long, 322, 480, em);
+  assert.equal(lines.length, 10); // 322 / 16 = 20 字/行
+  assert.equal(lines.join(""), long);
+  assert.ok(fitsAtMin(lines, 322));
+  // 多显式行：硬断行保留（§4.3-1），只有超宽的那条被折
+  const mixed = layoutTextLines("短\n" + "字".repeat(60), 322, 480, em);
+  assert.equal(mixed[0], "短");
+  assert.equal(mixed.length, 4);
+  assert.equal(mixed.slice(1).join(""), "字".repeat(60));
+  assert.ok(fitsAtMin(mixed, 322));
+  // 不超宽的显式行原样保留
+  assert.deepEqual(layoutTextLines("你\n好", 322, 480, em), ["你", "好"]);
+});
+
+test("§4.1 文字预算 = min(每字素上限 × 码点数, 对应档天花板)", () => {
+  assert.equal(PER_GLYPH_BUDGET, 64);
+  assert.equal(TEXT_HARD_CAP, 4800);
+  assert.equal(textBudget(0, false), 0);
+  assert.equal(textBudget(10, false), 10 * PER_GLYPH_BUDGET);
+  assert.equal(textBudget(50, false), 3200); // 中间区间：未触顶
+  assert.equal(textBudget(75, false), TEXT_HARD_CAP); // 75 字（= 4800 / 64）起触顶
+  assert.equal(textBudget(200, false), TEXT_HARD_CAP);
+  assert.equal(textBudget(5, true), PER_GLYPH_BUDGET * 5); // 320 < 512：未触顶
+  assert.equal(textBudget(9, true), REDUCED_TEXT_HARD_CAP); // 64 × 9 = 576 > 512
+  assert.equal(textBudget(200, true), REDUCED_TEXT_HARD_CAP);
+  assert.ok(REDUCED_TEXT_HARD_CAP <= 640); // 不给 reduced 档的火花留零头
+});
+
+test("§4.2 文字超额不挤死装饰：上限取 max(cap, textCount + DECOR_FLOOR)", () => {
+  const cap = 100;
+  const world = createWorld(scene(), view, { cap });
+  const slots = 400;
+  applyTargets(world, gridPoints(20, 20), 12);
+  assert.equal(world.targets.length, slots);
+  for (let i = 0; i < slots; i++) {
+    world.particles.push(
+      spark({ x: 10 + i, y: 10, kind: "text", settled: true, life: 1e9 }),
+    );
+  }
+  for (let i = 0; i < 900; i++) {
+    world.particles.push(spark({ x: 20 + (i % 700), y: 20, glue: false }));
+  }
+  step(world, 1 / 60);
+  const texts = textParticles(world);
+  const decor = world.particles.filter((p) => p.kind !== "text");
+  assert.equal(texts.length, slots, "文字零裁剪");
+  assert.ok(decor.length >= DECOR_FLOOR, `装饰保底不足：${decor.length}`);
+  assert.equal(decor.length, DECOR_FLOOR); // 裁到保底水位，不再往下裁
+  assert.equal(world.particles.length, slots + DECOR_FLOOR);
+  // 空祝福退化为现状：max(cap, 0 + DECOR_FLOOR)，默认上限下仍是 1800
+  const bare = createWorld(scene(), view);
+  for (let i = 0; i < 5000; i++) bare.particles.push(spark({ glue: false }));
+  step(bare, 1 / 60);
+  assert.equal(bare.targets.length, 0);
+  assert.equal(bare.particles.length, PARTICLE_CAP);
+});
+
+// ---- spec 03 §10.1：方向化 ASCII 文字（DOM 全部注入）----
+
+/** 合成遮罩：`fill` 返回每个像素的 alpha（0..255），s = 1。 */
+function maskOf(
+  w: number,
+  h: number,
+  fill: (x: number, y: number) => number,
+): Mask {
+  const alpha = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) alpha[y * w + x] = fill(x, y);
+  }
+  return { alpha, w, h, s: 1 };
+}
+
+const NO_RNG = (): number => 0.25;
+
+/** 角度差（mod 180，0..90）。 */
+const angleGap = (a: number, b: number): number => {
+  const d = Math.abs(((a - b) % 180) + 180) % 180;
+  return Math.min(d, 180 - d);
+};
+
+test("§10.1-1 字素不拆：ZWJ emoji、变体选择符、组合附加符", () => {
+  assert.ok(hasSegmenter(), "Node ≥22 自带 full-icu，应可直接测分段");
+  assert.deepEqual(splitGraphemes("👨‍👩‍👧"), ["👨‍👩‍👧"]);
+  assert.deepEqual(splitGraphemes("❤️"), ["❤️"]);
+  assert.equal(splitGraphemes("e\u0301").length, 1);
+  // 显式 `\n` 先行且原样保留
+  const run = segmentText("A👨‍👩‍👧\nB");
+  assert.deepEqual(run.segments, ["A👨‍👩‍👧", "B"]);
+  assert.deepEqual(run.graphemes[0], ["A", "👨‍👩‍👧"]);
+  assert.deepEqual(run.graphemes[1], ["B"]);
+});
+
+test("§10.1-2 word 段分类与断点：不在 ASCII 词内断（有词边界可选时）", () => {
+  const gs = splitGraphemes("hello 世界");
+  assert.deepEqual(gs, ["h", "e", "l", "l", "o", " ", "世", "界"]);
+  // 0 = 词/字素边界（空格、CJK 单字、词首尾）；1 = ASCII 词内
+  assert.deepEqual(cutRanks("hello 世界", gs), [0, 1, 1, 1, 1, 0, 0, 0, 0]);
+
+  const measure = halfEm;
+  // 等分点落在 "abcdefgh" 中间，但空格边界更优（词内惩罚生效）
+  assert.deepEqual(layoutTextLines("abcdefgh ijkl", 240, 180, measure), [
+    "abcdefgh",
+    "ijkl",
+  ]);
+  // 中英混排：CJK 字素边界与英文词边界同样优先
+  assert.deepEqual(cutRanks("世界你好hello", splitGraphemes("世界你好hello")), [
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 0,
+  ]);
+});
+
+test("§10.1-3 Intl.Segmenter 缺失走码点兜底，断点与主路径一致", () => {
+  const measure = halfEm;
+  const pangram = "The quick brown fox jumps over the lazy dog.";
+  assert.deepEqual(
+    layoutTextLines(pangram, 860, 400, measure, false),
+    layoutTextLines(pangram, 860, 400, measure, true),
+  );
+  // 显式差异：码点兜底不保字素原子性（emoji 拆成 5 个码点）
+  assert.equal(splitGraphemes("👨‍👩‍👧", false).length, 5);
+  assert.equal(splitGraphemes("e\u0301", false).length, 2);
+});
+
+test("§10.1-5 合成横/竖/斜块 → θ 落在对应 bin（±10°）", () => {
+  const W = 12;
+  const cases: [string, (x: number, y: number) => number, number][] = [
+    ["横", (_x, y) => (y >= 5 && y <= 6 ? 255 : 0), 0],
+    ["竖", (x) => (x >= 5 && x <= 6 ? 255 : 0), 90],
+    ["反斜 \\", (x, y) => (Math.abs(x - y) <= 1 ? 255 : 0), 45],
+    ["正斜 /", (x, y) => (Math.abs(x + y - (W - 1)) <= 1 ? 255 : 0), 135],
+  ];
+  for (const [name, fill, want] of cases) {
+    const m = maskOf(W, W, fill);
+    const f = cellFeatures(m.alpha, W, W, 0, 0, W, W);
+    assert.ok(angleGap(f.angle, want) <= 10, `${name}: angle=${f.angle}`);
+    assert.equal(directionBin(f.angle), directionBin(want), name);
+  }
+});
+
+test("§10.1-6 十字块 coherence 低；实心块 coverage 高且边缘弱", () => {
+  const W = 20;
+  const C = 16;
+  const cross = maskOf(W, W, (x, y) =>
+    Math.abs(x - W / 2) <= 1 || Math.abs(y - W / 2) <= 1 ? 255 : 0,
+  );
+  const f = cellFeatures(cross.alpha, W, W, 2, 2, C, C);
+  assert.ok(f.coherence < COH_MIN, `coherence=${f.coherence}`);
+
+  // 实心块：单元落在实心区内部（边界不在单元内）→ 无梯度、无处不是 ink
+  const solid = maskOf(W, W, () => 255);
+  const s = cellFeatures(solid.alpha, W, W, 2, 2, C, C);
+  assert.ok(s.coverage >= COVER_DENSE, `coverage=${s.coverage}`);
+  assert.ok(s.edge < EDGE_MIN, `edge=${s.edge}`);
+});
+
+test("§10.1-7 偏心细条重心偏移正确并被钳在 CENTROID_CLAMP 内", () => {
+  const W = 20;
+  // 中心上方 2px 的细条：重心偏移在钳制范围内，如实反映
+  const near = maskOf(W, W, (_x, y) => (y >= 7 && y <= 9 ? 255 : 0));
+  const f = cellFeatures(near.alpha, W, W, 0, 0, W, W);
+  assert.ok(Math.abs(f.cx) < 1e-9, `cx=${f.cx}`);
+  assert.ok(Math.abs(f.cy - -2) < 0.6, `cy=${f.cy}`);
+  // 贴顶边的细条：未钳制偏移 -9.5，必须被钳到 ±CENTROID_CLAMP × cell
+  const far = maskOf(W, W, (_x, y) => (y <= 1 ? 255 : 0));
+  const g = cellFeatures(far.alpha, W, W, 0, 0, W, W);
+  assert.equal(g.cy, -CENTROID_CLAMP * W);
+  assert.ok(Math.abs(g.cy) < 9.5, "钳制确实生效");
+});
+
+test("§10.1-8 空块不产生目标", () => {
+  const empty = maskOf(8, 8, () => 0);
+  const f = cellFeatures(empty.alpha, 8, 8, 0, 0, 8, 8);
+  assert.equal(f.coverage, 0);
+  assert.ok(f.coverage < COVER_MIN);
+  assert.deepEqual(gridTargets(empty, 8, 8, 0, 0, NO_RNG), []);
+});
+
+test("§10.1-9 pickGlyph 决策树四优先级；方向类无随机，内部/点缀走 rng", () => {
+  const feat = (patch: Partial<CellFeatures>): CellFeatures => ({
+    coverage: 0.2,
+    cx: 0,
+    cy: 0,
+    edge: 0,
+    coherence: 1,
+    angle: 0,
+    ...patch,
+  });
+  let calls = 0;
+  const counting = (v: number) => (): number => {
+    calls++;
+    return v;
+  };
+  // 1 内部类：`@` / `*` 类内随机
+  assert.equal(pickGlyph(feat({ coverage: COVER_DENSE }), counting(0.9)), "*");
+  assert.equal(calls, 1);
+  assert.equal(pickGlyph(feat({ coverage: 1 }), counting(0.1)), "@");
+  // 2 方向类：四个 bin 且不消耗 rng
+  calls = 0;
+  assert.equal(pickGlyph(feat({ edge: 1, coherence: 1, angle: 0 }), counting(0)), "-");
+  assert.equal(pickGlyph(feat({ edge: 1, coherence: 1, angle: 45 }), counting(0)), "\\");
+  assert.equal(pickGlyph(feat({ edge: 1, coherence: 1, angle: 90 }), counting(0)), "|");
+  assert.equal(pickGlyph(feat({ edge: 1, coherence: 1, angle: 135 }), counting(0)), "/");
+  assert.equal(calls, 0, "方向类必须无随机");
+  // 3 交叉/转折类
+  assert.equal(
+    pickGlyph(feat({ edge: 1, coherence: COH_MIN - 0.01 }), counting(0)),
+    "+",
+  );
+  // 4 点缀类：`.` / `:` 类内随机
+  assert.equal(pickGlyph(feat({ edge: EDGE_MIN - 0.01 }), counting(0.9)), ":");
+  assert.equal(pickGlyph(feat({ edge: EDGE_MIN - 0.01 }), counting(0.1)), ".");
+  // 确定性：同种子 rng 同结果
+  assert.equal(
+    pickGlyph(feat({ coverage: 1 }), createRng(7)),
+    pickGlyph(feat({ coverage: 1 }), createRng(7)),
+  );
+});
+
+test("§10.1-10 planCellScale：超预算则 k 增大，≤ MAX_ATTEMPTS 内落到预算内", () => {
+  const budget = 100;
+  const N = 600;
+  const seen: number[] = [];
+  const plan = planCellScale(budget, (k) => {
+    seen.push(k);
+    return Math.round(N / (k * k));
+  });
+  assert.ok(plan.k > 1, `k=${plan.k}`);
+  assert.ok(plan.k <= K_MAX);
+  assert.ok(plan.n <= budget, `n=${plan.n}`);
+  assert.ok(seen.length <= MAX_ATTEMPTS, `attempts=${seen.length}`);
+  assert.deepEqual(planCellScale(5000, () => 10), { k: 1, attempts: 1, n: 10 });
+
+  // 输出为连续扫描序（无 stride 缺口）：y 外层、x 内层，逐格相邻
+  const grid = maskOf(24, 24, () => 255);
+  const pts = gridTargets(grid, 12, 12, 0, 0, NO_RNG);
+  assert.deepEqual(
+    pts.map((p) => [p.x, p.y]),
+    [
+      [6, 6],
+      [18, 6],
+      [6, 18],
+      [18, 18],
+    ],
+  );
+});
+
+test("§10.1-11 字号几何：advance(cellH) ≤ cellW（固定 ratio 注入）", () => {
+  for (const ratio of [0.5, 0.6, 0.75]) {
+    for (const cellW of [7, 8, 13, 20, 50]) {
+      const { cellH } = cellMetrics(cellW, 1, ratio);
+      assert.ok(
+        ratio * cellH <= cellW,
+        `ratio=${ratio} cellW=${cellW} advance=${ratio * cellH}`,
+      );
+      assert.ok(cellW - ratio * cellH < 1, `取整误差应 <1px`);
+    }
+  }
+  const exact = cellMetrics(12, 1, 0.6);
+  assert.deepEqual(exact, { cellW: 12, cellH: 20 });
+  assert.equal(0.6 * exact.cellH, exact.cellW);
+});
+
+test("§10.1-12 applyTargets 透传 GlyphTarget.glyph；旧 Point[] 注入兼容", () => {
+  const world = createWorld(scene({ message: "祝福" }), view);
+  applyTargets(
+    world,
+    [
+      { x: 100, y: 100 },
+      { x: 200, y: 200, glyph: "|" },
+    ],
+    12,
+  );
+  assert.equal(world.targets.length, 2);
+  assert.equal(world.targets[0]?.glyph, undefined);
+  assert.equal(world.targets[1]?.glyph, "|");
+  assert.equal(world.step, 12);
+});
+
+test("§10.1-13 四个绑定点换形：捕获/收尾两路/低动就地形同步 slot.glyph", () => {
+  // 捕获（含低动态就地形：位置第一帧起在目标上，字形同样定型）
+  for (const reducedMotion of [false, true]) {
+    const world = createWorld(scene(), view, { reducedMotion });
+    applyTargets(world, [{ x: 400, y: 300, glyph: "/" }], 12);
+    const p = spark({ x: 400, y: 280, vy: 90, glyph: "@" });
+    world.particles.push(p);
+    assert.ok(stepUntil(world, () => p.kind === "text"), "应发生接触捕获");
+    assert.equal(p.glyph, "/");
+    assert.ok(stepUntil(world, () => p.settled === true, 2));
+    assert.equal(p.glyph, "/");
+  }
+  // 收尾飞行（bloom，含低动态就地淡入分支）
+  for (const reducedMotion of [false, true]) {
+    const world = createWorld(scene(), view, { reducedMotion });
+    applyTargets(world, [{ x: 400, y: 300, glyph: "-" }], 12);
+    startFinale(world);
+    assert.ok(stepUntil(world, () => textParticles(world).length === 1, 1));
+    assert.equal(textParticles(world)[0]?.glyph, "-");
+  }
+  // 完成态重排（fillFree）就地补齐
+  const settled = createWorld(scene({ message: "祝福" }), view);
+  settled.phase = "settled";
+  applyTargets(settled, [{ x: 100, y: 100, glyph: "*" }], 12);
+  assert.equal(textParticles(settled)[0]?.glyph, "*");
+});
+
+test("§10.1-14 视口迁移成功槽位同步占据者字形；失败释放路径不变", () => {
+  const world = createWorld(scene(), view);
+  applyTargets(world, gridPoints(4, 6), 12);
+  // 让部分槽位落定，再迁移到附近并换字形
+  const sticky = [0, 5, 10];
+  for (const i of sticky) {
+    const t = world.targets[i];
+    if (t) world.particles.push(spark({ x: t.x, y: t.y - 30, vy: 120 }));
+  }
+  assert.ok(stepUntil(world, () => world.stuck === sticky.length, 3));
+  for (const i of sticky) {
+    const t = world.targets[i];
+    if (t) t.glyph = "|";
+  }
+  const moved = gridPoints(4, 6).map((p) => ({ ...p, glyph: "+" }));
+  applyTargets(world, moved, 12);
+  assert.equal(world.stuck, 3, "只改字形不改位置，不应释放");
+  const holders = world.targets.filter((t) => t.state === "stuck").map((t) => t.holder);
+  assert.ok(holders.every((h) => h?.glyph === "+"));
+});
+
+test("§10.1-15 托底：在文字粒子之前、alpha 随 settleT 渐入、低动直接全量", () => {
+  const layout = {
+    lines: ["祝福"],
+    size: 80,
+    lineHeight: 108,
+    cellW: 20,
+    cellH: 24,
+    scale: 1,
+  };
   const draws: { text: string; font: string; alpha: number }[] = [];
   const ctx = {
     font: "",
@@ -128,17 +512,201 @@ test("低动态完成态先画等大半透明底字，再画放大的 ASCII", ()
       draws.push({ text, font: ctx.font, alpha: ctx.globalAlpha });
     },
   } as unknown as CanvasRenderingContext2D;
+  const mkWorld = (reducedMotion: boolean): World => {
+    const world = createWorld(scene({ message: "祝福" }), view, { reducedMotion });
+    world.phase = "settled";
+    world.textLayout = layout;
+    world.textSize = 24;
+    world.particles.push({
+      ...spark({ x: 400, y: 300, glyph: "@", kind: "text" }),
+      settled: true,
+    });
+    return world;
+  };
 
-  render(ctx, world);
+  // 常动态：settleT=0 时不画托底，只有文字粒子
+  const fresh = mkWorld(false);
+  render(ctx, fresh);
+  assert.deepEqual(draws.map((d) => d.text), ["@"]);
+  // 渐入未完成：alpha < BACKDROP_ALPHA 且托底在文字粒子之前
+  draws.length = 0;
+  fresh.settleT = BACKDROP_FADE / 2;
+  render(ctx, fresh);
+  assert.deepEqual(draws.map((d) => d.text), ["祝福", "@"]);
+  assert.ok((draws[0]?.alpha ?? 0) > 0 && (draws[0]?.alpha ?? 0) < BACKDROP_ALPHA);
+  assert.match(draws[0]?.font ?? "", /700 80px/);
+  assert.match(draws[1]?.font ?? "", /^24px/);
+  // 封顶 BACKDROP_ALPHA
+  draws.length = 0;
+  fresh.settleT = BACKDROP_FADE;
+  render(ctx, fresh);
+  assert.equal(draws[0]?.alpha, BACKDROP_ALPHA);
+  // 低动态：直接全量
+  draws.length = 0;
+  render(ctx, mkWorld(true));
   assert.deepEqual(
     draws.map(({ text, alpha }) => ({ text, alpha })),
     [
-      { text: "祝福", alpha: 0.2 },
+      { text: "祝福", alpha: BACKDROP_ALPHA },
       { text: "@", alpha: 1 },
     ],
   );
-  assert.match(draws[0]?.font ?? "", /700 80px/);
-  assert.match(draws[1]?.font ?? "", /^20px/);
+});
+
+test("§4.8-1 DOM 装配冒烟：stub canvas 跑通分段→遮罩→网格→目标", () => {
+  // 只验证 DOM 胶水能跑到底并写出几何契约；逐字素像素由 M11 纯函数测。
+  // stub 把“墨迹”模拟成以 `fillText` 锚点为中心的一条横带 → 可验证遮罩锚点与托底同源。
+  type Draw = {
+    text: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    align: string;
+    baseline: string;
+  };
+  const draws: Draw[] = [];
+  let ink: { from: number; to: number } | null = null;
+  const makeCanvas = (): {
+    width: number;
+    height: number;
+    getContext: () => CanvasRenderingContext2D;
+  } => {
+    let ctx: CanvasRenderingContext2D;
+    const canvas = {
+      width: 0,
+      height: 0,
+      // 同一个 canvas 必须复用同一个 ctx（代码会多次 getContext，状态要一致）
+      getContext: (): CanvasRenderingContext2D => ctx,
+    };
+    ctx = {
+      font: "",
+      fillStyle: "",
+      textAlign: "",
+      textBaseline: "",
+      measureText: (text: string) => ({
+        width: Array.from(text).length * 32,
+        fontBoundingBoxAscent: 32,
+        fontBoundingBoxDescent: 8,
+      }),
+      fillText: (text: string, x: number, y: number) => {
+        const fontPx = Number(/(\d+(?:\.\d+)?)px/.exec(ctx.font)?.[1] ?? 0);
+        ink = { from: y - 0.1 * fontPx, to: y + 0.1 * fontPx };
+        draws.push({
+          text,
+          x,
+          y,
+          w: canvas.width,
+          h: canvas.height,
+          align: ctx.textAlign,
+          baseline: ctx.textBaseline,
+        });
+      },
+      getImageData: (_x: number, _y: number, cw: number, ch: number) => {
+        const data = new Uint8ClampedArray(cw * ch * 4);
+        if (ink) {
+          for (
+            let y = Math.max(0, Math.ceil(ink.from));
+            y <= Math.min(ch - 1, ink.to);
+            y++
+          ) {
+            for (let x = 0; x < cw; x++) data[(y * cw + x) * 4 + 3] = 255;
+          }
+        }
+        return { data } as ImageData;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    return canvas;
+  };
+  const original = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = {
+    createElement: () => makeCanvas(),
+  };
+  try {
+    const world = createWorld(scene({ message: "祝福" }), view);
+    refreshTargets(world);
+    const layout = world.textLayout;
+    assert.ok(layout, "应写入排版结果");
+    assert.ok(world.targets.length > 0, "有墨迹应产生目标");
+    assert.equal(world.step, layout.cellH);
+    assert.equal(world.textSize, layout.cellH);
+    // spec 03 §3 栅格（2026-09 产品决策 CELL_MAX 12→10 / CELL_MIN 7→6）：
+    // 大字号被 CELL_MAX 钳住，小字号（200 字折行 → size = SIZE_MIN）被 CELL_MIN 钳住
+    assert.equal(layout.cellW, CELL_MAX);
+    const small = createWorld(scene({ message: "字".repeat(200) }), view);
+    refreshTargets(small);
+    assert.equal(small.textLayout?.cellW, CELL_MIN);
+    assert.ok(world.targets.every((t) => typeof t.glyph === "string"));
+    assert.ok(
+      world.targets.every((t) => t.x >= 0 && t.x <= view.w && t.y >= 0 && t.y <= view.h),
+    );
+
+    // 遮罩与托底同源（spec 03 §5-3）：同一 align/baseline，锚点就在遮罩盒中心 →
+    // 遮罩居中即锚点落在视口中心，与 render 的托底重合
+    const maskDraw = draws.find((d) => d.text === "祝福");
+    assert.ok(maskDraw, "遮罩应绘制祝福文字");
+    assert.equal(maskDraw.align, "center");
+    assert.equal(maskDraw.baseline, "middle");
+    assert.equal(maskDraw.x, maskDraw.w / 2, "锚点必须在遮罩盒水平中心");
+    assert.equal(maskDraw.y, maskDraw.h / 2, "锚点必须在遮罩盒垂直中心");
+    // 墨迹带（围绕锚点）经采样后的目标重心应在视口中心附近（误差 ≤ 一个单元）
+    const cx = world.targets.reduce((s, t) => s + t.x, 0) / world.targets.length;
+    const cy = world.targets.reduce((s, t) => s + t.y, 0) / world.targets.length;
+    assert.ok(Math.abs(cx - view.w / 2) <= layout.cellW, `cx=${cx}`);
+    assert.ok(Math.abs(cy - view.h / 2) <= layout.cellH, `cy=${cy}`);
+
+    // 扫描序连续：y 不降，同行 x 递增
+    for (let i = 1; i < world.targets.length; i++) {
+      const a = world.targets[i - 1];
+      const b = world.targets[i];
+      if (!a || !b) continue;
+      assert.ok(b.y >= a.y && (b.y > a.y || b.x > a.x));
+    }
+    // 空祝福：清空目标与排版（§4.8-1）
+    world.scene = { ...world.scene, message: "" };
+    refreshTargets(world);
+    assert.equal(world.textLayout, null);
+    assert.equal(world.targets.length, 0);
+  } finally {
+    (globalThis as { document?: unknown }).document = original;
+  }
+});
+
+test("爆炸火花数：单次爆炸 ≥ BLAST_SPARKS_BASE，低动态 × 0.4；双壳层含填满环心的内核盘", () => {
+  for (const reducedMotion of [false, true]) {
+    const world = createWorld(scene(), view, { reducedMotion });
+    launch(world, 400);
+    assert.ok(stepUntil(world, () => world.blasts === 1, 4), "应发生爆炸");
+    const sparks = world.particles.filter(
+      (p) => p.kind === "spark" || p.kind === "ember",
+    );
+    const want = Math.floor(BLAST_SPARKS_BASE * (reducedMotion ? 0.4 : 1));
+    assert.ok(sparks.length >= want, `${sparks.length} < ${want}`);
+    // 外层速率 ≥ SPARK_SPEED_MIN，内核铺在 [0.1, 0.9] × SPARK_SPEED_MIN（ember 自降速到 0.5×，
+    // 故只统计 kind === 'spark'）
+    const speeds = world.particles
+      .filter((p) => p.kind === "spark")
+      .map((p) => Math.hypot(p.vx, p.vy));
+    assert.ok(Math.min(...speeds) < 70, `无慢速内核：${Math.min(...speeds)}`);
+    assert.ok(Math.max(...speeds) >= 100, `无外层：${Math.max(...speeds)}`);
+    // 内核不是单一速率：单速会让全部内核粒子落在同一半径上 → 空心圈
+    // （review/04 §4「双壳层观感」的 2026-09 修正）
+    const core = speeds.filter((s) => s < SPARK_SPEED_MIN);
+    assert.ok(core.length > 20, `内核粒子太少：${core.length}`);
+    assert.ok(
+      Math.min(...core) <= SPARK_SPEED_MIN * 0.3,
+      `内核未铺到近静止：${Math.min(...core)}`,
+    );
+    assert.ok(
+      Math.max(...core) >= SPARK_SPEED_MIN * 0.7,
+      `内核未铺到外层下限：${Math.max(...core)}`,
+    );
+    const bands = new Set(core.map((s) => Math.floor(s / 20)));
+    assert.ok(
+      bands.size >= 4,
+      `内核速率只有 ${bands.size} 档：${[...bands].join(",")}`,
+    );
+  }
 });
 
 test("createRng 同种子可复现、异种子不同、取值在 [0,1)", () => {
@@ -168,10 +736,10 @@ test("七枚火箭全部飞到顶点并爆炸", () => {
   assert.ok(world.particles.length > 0);
 });
 
-test("默认上限 1200，reduced motion 为 420", () => {
-  assert.equal(PARTICLE_CAP, 1200);
-  assert.equal(createWorld(scene(), view).cap, 1200);
-  assert.equal(createWorld(scene(), view, { reducedMotion: true }).cap, 420);
+test("默认上限 1800，reduced motion 为 640", () => {
+  assert.equal(PARTICLE_CAP, 1800);
+  assert.equal(createWorld(scene(), view).cap, 1800);
+  assert.equal(createWorld(scene(), view, { reducedMotion: true }).cap, 640);
 });
 
 test("§8.1-1 applyTargets 初始化槽位、身份顺序与计数", () => {
@@ -300,7 +868,7 @@ test("§8.1-6 粘点持久性：连点与上限压力下只增不减", () => {
   assert.ok(prev > 0, "20s 连点应至少留下一个粘点");
 });
 
-test("§8.1-13 预算保护：文字粒子不参与上限裁剪", () => {
+test("§8.1-13 预算保护：文字粒子不参与上限裁剪，且装饰有保底额度", () => {
   const cap = 200;
   const world = createWorld(scene(), view, { cap });
   applyTargets(world, gridPoints(6, 10), 12);
@@ -308,8 +876,10 @@ test("§8.1-13 预算保护：文字粒子不参与上限裁剪", () => {
   step(world, 3);
   const rockets = world.particles.filter((p) => p.kind === "rocket").length;
   const nonRocket = world.particles.filter((p) => p.kind !== "rocket");
-  assert.ok(nonRocket.length <= cap, `${nonRocket.length} > ${cap}`);
-  assert.ok(world.particles.length <= cap + rockets);
+  // spec 04 §4.2：上限 = max(cap, textCount + DECOR_FLOOR)，文字超额也要给装饰留活口
+  const limit = Math.max(cap, world.targets.length + DECOR_FLOOR);
+  assert.ok(nonRocket.length <= limit, `${nonRocket.length} > ${limit}`);
+  assert.ok(world.particles.length <= limit + rockets);
   const texts = textParticles(world);
   assert.ok(texts.length > 0, "应留下粘点或在途粒子");
   assert.ok(texts.every((p) => p.life > 1e6));

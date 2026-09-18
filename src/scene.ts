@@ -3,8 +3,10 @@
  * 零 import、零 DOM 依赖，Node 可直接执行（见 scene.test.ts）。
  */
 
-export const MAX_CHARS = 60;
-export const MAX_LINES = 3;
+/** 码点上限（spec 04 §3.1）：URL 分享安全线推导，不再是性能数。 */
+export const MAX_CHARS = 200;
+/** 显式行数与自动候选行数上限（spec 04 §3.1）；折行结果可超出此值（§4.3-3）。 */
+export const MAX_LINES = 8;
 export const PALETTE_IDS = ["rose", "amber", "aurora", "mono"] as const;
 export type PaletteId = (typeof PALETTE_IDS)[number];
 
@@ -75,7 +77,7 @@ export function countCodepoints(s: string): number {
   return [...s].length;
 }
 
-/** 编辑器输入路径：先规范化，再按码点截断到 60、按行截断到 3 行。 */
+/** 编辑器输入路径：先规范化，再按码点截断到 MAX_CHARS、按行截断到 MAX_LINES 行。 */
 export function clampMessage(raw: string): string {
   const lines = normalizeMessage(raw).split("\n").slice(0, MAX_LINES);
   return normalizeMessage([...lines.join("\n")].slice(0, MAX_CHARS).join(""));
