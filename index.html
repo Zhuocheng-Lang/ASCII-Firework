@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#050409" />
+    <title>ASCII Firework</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="aura" aria-hidden="true"></div>
+    <canvas id="sky" aria-hidden="true"></canvas>
+
+    <p id="hint">把烟花放在不同的地方，看看留下了什么。</p>
+
+    <div id="controls">
+      <button id="sound" type="button" aria-pressed="false">声音：关</button>
+      <button id="bloom" type="button" hidden>让祝福完整绽放</button>
+      <button id="edit" type="button">写下祝福</button>
+      <button id="replay" type="button" hidden>重新播放</button>
+    </div>
+
+    <p id="live" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+    <p id="status" class="sr-only" role="status"></p>
+
+    <dialog id="editor" aria-labelledby="editor-title">
+      <form method="dialog">
+        <h2 id="editor-title">写下祝福</h2>
+        <label for="msg">祝福（最多 3 行、60 字）</label>
+        <textarea id="msg" rows="3" autocomplete="off" spellcheck="false"></textarea>
+        <p id="counter" class="counter" aria-live="off"></p>
+
+        <fieldset>
+          <legend>配色</legend>
+          <label><input type="radio" name="palette" value="rose" /> 玫瑰</label>
+          <label><input type="radio" name="palette" value="amber" /> 琥珀</label>
+          <label><input type="radio" name="palette" value="aurora" /> 极光</label>
+          <label><input type="radio" name="palette" value="mono" /> 墨白</label>
+        </fieldset>
+
+        <menu>
+          <button id="reroll" type="button">换一种绽放</button>
+          <button id="share" type="button">分享</button>
+          <button value="close">关闭</button>
+        </menu>
+        <input
+          id="share-url"
+          class="share-url"
+          type="text"
+          readonly
+          hidden
+          aria-label="分享链接"
+        />
+      </form>
+    </dialog>
+
+    <noscript>这个页面需要 JavaScript 才能放烟花。</noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

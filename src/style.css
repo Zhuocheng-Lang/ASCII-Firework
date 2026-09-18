@@ -1,0 +1,219 @@
+@font-face {
+  font-family: "ascii-mono";
+  src: url("/fonts/ascii-mono.woff2") format("woff2");
+  font-display: block;
+}
+
+:root {
+  --bg-1: #15101c;
+  --bg-2: #050409;
+  --rocket: #ffe3ee;
+  --spark-1: #ff8fbe;
+  --spark-2: #ff5f9e;
+  --spark-3: #ffd0a8;
+  --glow: #ff3d7f;
+  --ui-text: #f3eef5;
+  --ui-dim: #b9b1c0;
+  --aura-opacity: 1;
+
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100dvh;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-2);
+  color: var(--ui-text);
+  font:
+    16px / 1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+#aura {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    120% 80% at 50% 110%,
+    var(--bg-1),
+    var(--bg-2) 60%
+  );
+  opacity: var(--aura-opacity);
+  transition: opacity 1.2s ease;
+}
+
+#sky {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+#hint {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(5.5rem + env(safe-area-inset-bottom));
+  margin: 0;
+  text-align: center;
+  color: var(--ui-dim);
+  font-size: 0.95rem;
+  pointer-events: none;
+  transition: opacity 0.8s ease;
+}
+
+#hint[data-faded="true"] {
+  opacity: 0;
+}
+
+#controls {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(1rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  padding: 0 calc(1rem + env(safe-area-inset-left)) 0
+    calc(1rem + env(safe-area-inset-right));
+}
+
+button {
+  min-height: 44px;
+  padding: 0 1rem;
+  border: 1px solid color-mix(in srgb, var(--glow) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-1) 88%, transparent);
+  color: var(--ui-text);
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--glow);
+  outline-offset: 2px;
+}
+
+button[aria-pressed="true"] {
+  border-color: var(--glow);
+  color: var(--glow);
+}
+
+dialog {
+  max-width: min(30rem, 92vw);
+  /* 手机横屏等矮视口：内容在对话框内部滚动，控件不会落到可视区外 */
+  max-height: calc(
+    100dvh -
+    2rem -
+    env(safe-area-inset-top) -
+    env(safe-area-inset-bottom)
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--glow) 35%, transparent);
+  border-radius: 1rem;
+  background: var(--bg-2);
+  color: var(--ui-text);
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+dialog h2 {
+  margin: 0 0 1rem;
+  font-size: 1.2rem;
+}
+
+dialog label,
+dialog legend,
+dialog p {
+  font-size: 1rem;
+}
+
+dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--ui-dim) 40%, transparent);
+  border-radius: 0.5rem;
+  background: var(--bg-1);
+  color: var(--ui-text);
+  font: inherit;
+  resize: none;
+}
+
+dialog fieldset {
+  margin: 1rem 0 0;
+  border: 1px solid color-mix(in srgb, var(--ui-dim) 30%, transparent);
+  border-radius: 0.5rem;
+}
+
+dialog fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 44px;
+  margin-right: 0.75rem;
+}
+
+dialog menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin: 1rem 0 0;
+  padding: 0;
+}
+
+.counter {
+  margin: 0.35rem 0 0;
+  color: var(--ui-dim);
+  font-size: 0.85rem;
+}
+
+.share-url {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--glow) 45%, transparent);
+  border-radius: 0.5rem;
+  background: var(--bg-1);
+  color: var(--ui-text);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #aura,
+  #hint {
+    transition: none;
+  }
+}

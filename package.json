@@ -1,0 +1,21 @@
+{
+  "name": "ascii-firework",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.1",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --test \"src/*.test.ts\"",
+    "check:deploy": "pnpm build && wrangler deploy --dry-run",
+    "deploy": "pnpm build && wrangler deploy"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "wrangler": "^4.131.1"
+  }
+}
