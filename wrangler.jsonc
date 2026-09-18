@@ -2,6 +2,17 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ascii-firework",
   "compatibility_date": "2026-09-14",
+  // 面板（Cloudflare Dashboard）是配置真源；这里把每个字段显式写死，
+  // 因为"没写"不等于"不改"——wrangler 会用它的默认值覆盖远端，和面板打架时就出现
+  // "differs from the remote configuration" 警告。同步办法：面板改了配置后，
+  // 把部署日志里 `-` 行的远端值抄回本文件再推送，警告即消失。
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
+  },
   "assets": {
     "directory": "./dist"
   }

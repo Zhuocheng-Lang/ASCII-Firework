@@ -30,6 +30,26 @@ pnpm build && pnpm exec wrangler dev   # 验证 public/_headers（curl -sI http:
 > 不要写成裸的 `pnpm exec wrangler deploy`（不保证是最新构建），也不要写成 `pnpm deploy`
 > （会撞上 pnpm 内置的 `deploy` 子命令，报 `ERR_PNPM_INVALID_DEPLOY_TARGET`）。
 
+### Workers Builds（连 Git 自动部署）
+
+仓库已接入 Workers Builds：**push 到 `main` 就自动构建并部署**（等于一次上线），面板里三个字段是：
+
+| 字段 | 取值 |
+| --- | --- |
+| Build command | `pnpm run build` |
+| Deploy command | `pnpm exec wrangler deploy` |
+| Non-production branch deploy command | `pnpm exec wrangler versions upload`（只在开了分支预览时需要） |
+
+Deploy command **MUST** 用 `pnpm exec`（跑 lockfile 锁定的 wrangler）。写成 `pnpx` / `pnpm dlx`
+会临时安装最新版 wrangler，并在全新的 store 里撞上 `pnpm-workspace.yaml` 的构建脚本门禁，
+以 `ERR_PNPM_IGNORED_BUILDS` 失败。
+
+> **配置真源是 Cloudflare 面板，冲突时改本仓库。** `wrangler deploy` 会用 `wrangler.jsonc`
+> 里显式写下的值覆盖面板设置（**没写的字段按 wrangler 默认值覆盖**，不等于不动），所以面板
+> 改完配置后，下一次部署日志会出现 `differs from the remote configuration` 警告并列出差异
+> （`-` 是面板值、`+` 是本文件值）：把 `-` 行的值抄回 `wrangler.jsonc` 再推送，警告即消失。
+> 不要再在面板里点一遍——那只会制造下一次警告。
+
 ### 部署后自测（已跑过的线上检查）
 
 ```bash
